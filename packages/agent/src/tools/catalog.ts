@@ -62,6 +62,43 @@ export const TOOL_CATALOG: ToolDefinition[] = [
       required: ["owner", "repo", "title"],
     },
   },
+  {
+    id: "github_create_repo",
+    name: "github_create_repo",
+    description:
+      "Creates a new GitHub repository for the authenticated user. Requires confirmation.",
+    risk: "medium",
+    requires_integration: "github",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Repository name" },
+        description: { type: "string", description: "Repository description" },
+        is_private: {
+          type: "boolean",
+          description: "Whether the repository should be private",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    id: "gmail_list_today_emails",
+    name: "gmail_list_today_emails",
+    description: "Lists emails received today from the user's Gmail inbox.",
+    risk: "low",
+    requires_integration: "google",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        max_results: {
+          type: "number",
+          description: "Max emails to return (default 20, max 50)",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 export function getToolRisk(toolId: string): ToolRisk {

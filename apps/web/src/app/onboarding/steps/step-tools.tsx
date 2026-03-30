@@ -43,6 +43,20 @@ const AVAILABLE_TOOLS = [
     risk: "medium" as const,
     requiresIntegration: "github",
   },
+  {
+    id: "github_create_repo",
+    name: "GitHub: crear repositorio",
+    description: "Crea un repositorio nuevo (requiere confirmación).",
+    risk: "medium" as const,
+    requiresIntegration: "github",
+  },
+  {
+    id: "gmail_list_today_emails",
+    name: "Gmail: emails de hoy",
+    description: "Lista los correos recibidos hoy en tu Gmail.",
+    risk: "low" as const,
+    requiresIntegration: "google",
+  },
 ];
 
 const RISK_LABELS = {

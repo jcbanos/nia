@@ -9,6 +9,8 @@ interface Props {
   profile: Record<string, unknown> | null;
   toolSettings: Array<{ tool_id: string; enabled: boolean }>;
   telegramLinked: boolean;
+  githubConnected: boolean;
+  googleConnected: boolean;
 }
 
 const TOOL_IDS = [
@@ -17,12 +19,22 @@ const TOOL_IDS = [
   "github_list_repos",
   "github_list_issues",
   "github_create_issue",
+  "github_create_repo",
+  "gmail_list_today_emails",
 ];
 
-export function SettingsForm({ userId, profile, toolSettings, telegramLinked }: Props) {
+export function SettingsForm({ userId, profile, toolSettings, telegramLinked, githubConnected, googleConnected }: Props) {
   const router = useRouter();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [githubStatus, setGithubStatus] = useState<"connected" | "disconnected">(
+    githubConnected ? "connected" : "disconnected"
+  );
+  const [googleStatus, setGoogleStatus] = useState<"connected" | "disconnected">(
+    googleConnected ? "connected" : "disconnected"
+  );
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [disconnectingGoogle, setDisconnectingGoogle] = useState(false);
 
   const [name, setName] = useState((profile?.name as string) ?? "");
   const [agentName, setAgentName] = useState((profile?.agent_name as string) ?? "Agente");
@@ -141,6 +153,76 @@ export function SettingsForm({ userId, profile, toolSettings, telegramLinked }: 
             </label>
           ))}
         </div>
+      </section>
+
+      {/* GitHub */}
+      <section className="space-y-4">
+        <h2 className="text-base font-semibold">GitHub</h2>
+        {githubStatus === "connected" ? (
+          <div className="space-y-2">
+            <p className="text-sm text-green-600">Cuenta de GitHub conectada.</p>
+            <button
+              onClick={async () => {
+                setDisconnecting(true);
+                await fetch("/api/github/disconnect", { method: "POST" });
+                setGithubStatus("disconnected");
+                setDisconnecting(false);
+                router.refresh();
+              }}
+              disabled={disconnecting}
+              className="rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+            >
+              {disconnecting ? "Desconectando..." : "Desconectar GitHub"}
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm text-neutral-500">
+              Conecta tu cuenta de GitHub para que el agente pueda gestionar repositorios e issues.
+            </p>
+            <a
+              href="/api/github/authorize"
+              className="inline-block rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium hover:bg-neutral-50 dark:border-neutral-700 dark:hover:bg-neutral-900"
+            >
+              Conectar GitHub
+            </a>
+          </div>
+        )}
+      </section>
+
+      {/* Google / Gmail */}
+      <section className="space-y-4">
+        <h2 className="text-base font-semibold">Google / Gmail</h2>
+        {googleStatus === "connected" ? (
+          <div className="space-y-2">
+            <p className="text-sm text-green-600">Cuenta de Google conectada.</p>
+            <button
+              onClick={async () => {
+                setDisconnectingGoogle(true);
+                await fetch("/api/google/disconnect", { method: "POST" });
+                setGoogleStatus("disconnected");
+                setDisconnectingGoogle(false);
+                router.refresh();
+              }}
+              disabled={disconnectingGoogle}
+              className="rounded-md border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+            >
+              {disconnectingGoogle ? "Desconectando..." : "Desconectar Google"}
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm text-neutral-500">
+              Conecta tu cuenta de Google para que el agente pueda leer tus correos de Gmail.
+            </p>
+            <a
+              href="/api/google/authorize"
+              className="inline-block rounded-md border border-neutral-300 px-3 py-1.5 text-sm font-medium hover:bg-neutral-50 dark:border-neutral-700 dark:hover:bg-neutral-900"
+            >
+              Conectar Google
+            </a>
+          </div>
+        )}
       </section>
 
       {/* Telegram */}

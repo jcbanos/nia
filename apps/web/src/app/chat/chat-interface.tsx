@@ -8,6 +8,13 @@ interface Message {
   created_at?: string;
 }
 
+interface PendingConfirmation {
+  tool_call_id: string;
+  tool_name: string;
+  message: string;
+  args: Record<string, unknown>;
+}
+
 interface Props {
   agentName: string;
   initialMessages: Message[];
@@ -17,11 +24,14 @@ export function ChatInterface({ agentName, initialMessages }: Props) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pendingConfirmation, setPendingConfirmation] =
+    useState<PendingConfirmation | null>(null);
+  const [resolving, setResolving] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, pendingConfirmation]);
 
   async function handleSend(e: React.FormEvent) {
     e.preventDefault();
@@ -32,6 +42,7 @@ export function ChatInterface({ agentName, initialMessages }: Props) {
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setLoading(true);
+    setPendingConfirmation(null);
 
     try {
       const res = await fetch("/api/chat", {
@@ -50,21 +61,63 @@ export function ChatInterface({ agentName, initialMessages }: Props) {
       }
 
       if (data.pendingConfirmation) {
+        setPendingConfirmation(data.pendingConfirmation);
+      }
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Error al procesar tu mensaje. Intenta de nuevo.",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleResolve(action: "approve" | "reject") {
+    if (!pendingConfirmation || resolving) return;
+    setResolving(true);
+
+    try {
+      const res = await fetch(
+        `/api/tool-calls/${pendingConfirmation.tool_call_id}/resolve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        }
+      );
+
+      const data = await res.json();
+      setPendingConfirmation(null);
+
+      if (action === "approve" && data.result) {
+        const msg =
+          data.result.message ??
+          data.result.error ??
+          "Acción ejecutada.";
         setMessages((prev) => [
           ...prev,
-          {
-            role: "assistant",
-            content: `Se requiere confirmación: ${data.pendingConfirmation.message}\n\n¿Deseas proceder?`,
-          },
+          { role: "assistant", content: String(msg) },
+        ]);
+      } else if (action === "reject") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "Acción cancelada." },
         ]);
       }
     } catch {
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: "Error al procesar tu mensaje. Intenta de nuevo." },
+        {
+          role: "assistant",
+          content: "Error al resolver la confirmación.",
+        },
       ]);
     } finally {
-      setLoading(false);
+      setResolving(false);
     }
   }
 
@@ -97,6 +150,33 @@ export function ChatInterface({ agentName, initialMessages }: Props) {
               </div>
             </div>
           ))}
+
+          {pendingConfirmation && (
+            <div className="flex justify-start">
+              <div className="max-w-[80%] rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm dark:border-amber-700 dark:bg-amber-950">
+                <p className="mb-3 text-neutral-900 dark:text-neutral-100">
+                  {pendingConfirmation.message}
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleResolve("approve")}
+                    disabled={resolving}
+                    className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {resolving ? "..." : "Aprobar"}
+                  </button>
+                  <button
+                    onClick={() => handleResolve("reject")}
+                    disabled={resolving}
+                    className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                  >
+                    {resolving ? "..." : "Rechazar"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {loading && (
             <div className="flex justify-start">
               <div className="rounded-lg bg-neutral-100 px-4 py-2.5 text-sm dark:bg-neutral-800">

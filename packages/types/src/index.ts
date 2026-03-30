@@ -18,6 +18,7 @@ export interface UserIntegration {
   id: string;
   user_id: string;
   provider: string;
+  encrypted_tokens?: string;
   scopes: string[];
   status: "active" | "revoked" | "expired";
   created_at: string;
@@ -72,6 +73,13 @@ export interface TelegramAccount {
   telegram_user_id: number;
   chat_id: number;
   linked_at: string;
+}
+
+export interface PendingConfirmation {
+  tool_call_id: string;
+  tool_name: string;
+  message: string;
+  args: Record<string, unknown>;
 }
 
 export interface ToolDefinition {
