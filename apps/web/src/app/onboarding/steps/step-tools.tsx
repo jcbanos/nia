@@ -1,69 +1,12 @@
 "use client";
 
 import type { OnboardingData } from "../wizard";
+import { TOOL_UI_METADATA, RISK_LABELS } from "@agents/types";
 
 interface Props {
   data: OnboardingData;
   onChange: (partial: Partial<OnboardingData>) => void;
 }
-
-const AVAILABLE_TOOLS = [
-  {
-    id: "get_user_preferences",
-    name: "Preferencias del usuario",
-    description: "Consulta tu configuración y preferencias.",
-    risk: "low" as const,
-    requiresIntegration: null,
-  },
-  {
-    id: "list_enabled_tools",
-    name: "Listar herramientas",
-    description: "Muestra qué herramientas tienes habilitadas.",
-    risk: "low" as const,
-    requiresIntegration: null,
-  },
-  {
-    id: "github_list_repos",
-    name: "GitHub: listar repos",
-    description: "Lista tus repositorios de GitHub.",
-    risk: "low" as const,
-    requiresIntegration: "github",
-  },
-  {
-    id: "github_list_issues",
-    name: "GitHub: listar issues",
-    description: "Lista issues de un repositorio.",
-    risk: "low" as const,
-    requiresIntegration: "github",
-  },
-  {
-    id: "github_create_issue",
-    name: "GitHub: crear issue",
-    description: "Crea un issue nuevo (requiere confirmación).",
-    risk: "medium" as const,
-    requiresIntegration: "github",
-  },
-  {
-    id: "github_create_repo",
-    name: "GitHub: crear repositorio",
-    description: "Crea un repositorio nuevo (requiere confirmación).",
-    risk: "medium" as const,
-    requiresIntegration: "github",
-  },
-  {
-    id: "gmail_list_today_emails",
-    name: "Gmail: emails de hoy",
-    description: "Lista los correos recibidos hoy en tu Gmail.",
-    risk: "low" as const,
-    requiresIntegration: "google",
-  },
-];
-
-const RISK_LABELS = {
-  low: { text: "Bajo", color: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400" },
-  medium: { text: "Medio", color: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400" },
-  high: { text: "Alto", color: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400" },
-};
 
 export function StepTools({ data, onChange }: Props) {
   function toggleTool(toolId: string) {
@@ -86,7 +29,7 @@ export function StepTools({ data, onChange }: Props) {
       </div>
 
       <div className="space-y-3">
-        {AVAILABLE_TOOLS.map((tool) => {
+        {TOOL_UI_METADATA.map((tool) => {
           const risk = RISK_LABELS[tool.risk];
           const enabled = data.enabledTools.includes(tool.id);
           return (

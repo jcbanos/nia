@@ -1,8 +1,8 @@
-import { StateGraph, Annotation, MemorySaver } from "@langchain/langgraph";
+import { createAgent, humanInTheLoopMiddleware } from "langchain";
+import { MemorySaver, Command } from "@langchain/langgraph";
 import {
   HumanMessage,
   AIMessage,
-  SystemMessage,
   type BaseMessage,
 } from "@langchain/core/messages";
 import type { DbClient } from "@agents/db";
@@ -10,26 +10,35 @@ import type {
   UserToolSetting,
   UserIntegration,
   PendingConfirmation,
+  InterruptPayload,
+  HumanDecision,
 } from "@agents/types";
 import { createChatModel } from "./model";
 import { buildLangChainTools } from "./tools/adapters";
 import { getSessionMessages, addMessage } from "@agents/db";
+import { toolRequiresConfirmation } from "./tools/catalog";
 
-export const CONFIRMATION_SENTINEL = "__confirmation_required__";
+// Module-level singleton – survives across HTTP requests within the same
+// process.  Swap for @langchain/langgraph-checkpoint-postgres in production.
+const checkpointer = new MemorySaver();
 
-const GraphState = Annotation.Root({
-  messages: Annotation<BaseMessage[]>({
-    reducer: (prev, next) => [...prev, ...next],
-    default: () => [],
-  }),
-  sessionId: Annotation<string>(),
-  userId: Annotation<string>(),
-  systemPrompt: Annotation<string>(),
-  pendingConfirmation: Annotation<PendingConfirmation | null>({
-    reducer: (_prev, next) => next,
-    default: () => null,
-  }),
-});
+// ---------------------------------------------------------------------------
+// Interrupt config – maps each tool to whether HITL middleware should pause
+// ---------------------------------------------------------------------------
+
+function buildInterruptConfig(
+  tools: { name: string }[],
+): Record<string, boolean> {
+  const cfg: Record<string, boolean> = {};
+  for (const t of tools) {
+    cfg[t.name] = toolRequiresConfirmation(t.name);
+  }
+  return cfg;
+}
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
 
 export interface AgentInput {
   message: string;
@@ -46,9 +55,151 @@ export interface AgentOutput {
   response: string;
   toolCalls: string[];
   pendingConfirmation: PendingConfirmation | null;
+  interrupt: InterruptPayload | null;
 }
 
-const MAX_TOOL_ITERATIONS = 6;
+export interface ResumeInput {
+  sessionId: string;
+  decisions: HumanDecision[];
+  db: DbClient;
+  userId: string;
+  systemPrompt: string;
+  enabledTools: UserToolSetting[];
+  integrations: UserIntegration[];
+  decryptedTokens: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+interface ToolBuildContext {
+  db: DbClient;
+  userId: string;
+  sessionId: string;
+  enabledTools: UserToolSetting[];
+  integrations: UserIntegration[];
+  decryptedTokens: Record<string, string>;
+}
+
+function buildConfiguredAgent(ctx: ToolBuildContext, systemPrompt: string) {
+  const lcTools = buildLangChainTools(ctx);
+  return createAgent({
+    model: createChatModel(),
+    tools: lcTools,
+    systemPrompt,
+    middleware: [
+      humanInTheLoopMiddleware({
+        interruptOn: buildInterruptConfig(lcTools),
+      }),
+    ],
+    checkpointer,
+  });
+}
+
+function extractToolCallNames(messages: BaseMessage[]): string[] {
+  const names: string[] = [];
+  for (const msg of messages) {
+    if (msg instanceof AIMessage && msg.tool_calls?.length) {
+      for (const tc of msg.tool_calls) {
+        names.push(tc.name);
+      }
+    }
+  }
+  return names;
+}
+
+interface ParsedResult {
+  interrupt: InterruptPayload | null;
+  pendingConfirmation: PendingConfirmation | null;
+  responseText: string;
+  toolCalls: string[];
+}
+
+function parseAgentResult(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  raw: any,
+  sessionId: string,
+): ParsedResult {
+  const messages: BaseMessage[] = raw.messages ?? [];
+  const toolCalls = extractToolCallNames(messages);
+
+  if (raw.__interrupt__?.length) {
+    const val = raw.__interrupt__[0].value;
+
+    // The middleware emits camelCase keys (actionRequests, reviewConfigs,
+    // args, actionName, allowedDecisions). Map them to our snake_case types.
+    const rawActions: any[] =
+      val.actionRequests ?? val.action_requests ?? [];
+    const rawReviews: any[] =
+      val.reviewConfigs ?? val.review_configs ?? [];
+
+    const interrupt: InterruptPayload = {
+      action_requests: rawActions.map((ar: any) => ({
+        name: ar.name,
+        arguments: ar.args ?? ar.arguments ?? {},
+        description: ar.description,
+      })),
+      review_configs: rawReviews.map((rc: any) => ({
+        action_name: rc.actionName ?? rc.action_name,
+        allowed_decisions: rc.allowedDecisions ?? rc.allowed_decisions ?? [],
+      })),
+    };
+
+    const first = interrupt.action_requests[0];
+    const pendingConfirmation: PendingConfirmation | null = first
+      ? {
+          tool_call_id: sessionId,
+          tool_name: first.name,
+          message:
+            first.description ??
+            `Confirmation required for ${first.name}`,
+          args: first.arguments,
+          interrupt,
+        }
+      : null;
+
+    return {
+      interrupt,
+      pendingConfirmation,
+      responseText: pendingConfirmation?.message ?? "",
+      toolCalls,
+    };
+  }
+
+  const last = messages[messages.length - 1];
+  const responseText =
+    typeof last?.content === "string"
+      ? last.content
+      : JSON.stringify(last?.content ?? "");
+
+  return { interrupt: null, pendingConfirmation: null, responseText, toolCalls };
+}
+
+async function toAgentOutput(
+  db: DbClient,
+  sessionId: string,
+  parsed: ParsedResult,
+): Promise<AgentOutput> {
+  const textToStore = parsed.interrupt
+    ? parsed.pendingConfirmation?.message
+    : parsed.responseText;
+
+  if (textToStore) {
+    await addMessage(db, sessionId, "assistant", textToStore);
+  }
+
+  return {
+    response: parsed.responseText,
+    toolCalls: parsed.toolCalls,
+    pendingConfirmation: parsed.pendingConfirmation,
+    interrupt: parsed.interrupt,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 export async function runAgent(input: AgentInput): Promise<AgentOutput> {
   const {
@@ -62,147 +213,69 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
     decryptedTokens,
   } = input;
 
-  const model = createChatModel();
-  const lcTools = buildLangChainTools({
-    db,
-    userId,
-    sessionId,
-    enabledTools,
-    integrations,
-    decryptedTokens,
-  });
+  const agent = buildConfiguredAgent(
+    { db, userId, sessionId, enabledTools, integrations, decryptedTokens },
+    systemPrompt,
+  );
 
-  const modelWithTools = lcTools.length > 0 ? model.bindTools(lcTools) : model;
+  const config = { configurable: { thread_id: sessionId } };
 
-  const history = await getSessionMessages(db, sessionId, 30);
-  const priorMessages: BaseMessage[] = history.map((m) => {
-    if (m.role === "user") return new HumanMessage(m.content);
-    if (m.role === "assistant") return new AIMessage(m.content);
-    return new HumanMessage(m.content);
-  });
+  // If the checkpointer already holds state for this thread we only append
+  // the new message; otherwise we bootstrap from the database so the model
+  // has full conversational context.
+  let hasCheckpoint = false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const snap: any = await (agent as any).getState(config);
+    const msgs = snap?.values?.messages;
+    hasCheckpoint = Array.isArray(msgs) && msgs.length > 0;
+  } catch {
+    /* no checkpoint yet */
+  }
+
+  let inputMessages: BaseMessage[];
+  if (hasCheckpoint) {
+    inputMessages = [new HumanMessage(message)];
+  } else {
+    const history = await getSessionMessages(db, sessionId, 30);
+    inputMessages = [
+      ...history.map((m) =>
+        m.role === "user"
+          ? new HumanMessage(m.content)
+          : new AIMessage(m.content),
+      ),
+      new HumanMessage(message),
+    ];
+  }
 
   await addMessage(db, sessionId, "user", message);
 
-  const toolCallNames: string[] = [];
+  const result = await agent.invoke({ messages: inputMessages }, config);
+  return toAgentOutput(db, sessionId, parseAgentResult(result, sessionId));
+}
 
-  async function agentNode(
-    state: typeof GraphState.State
-  ): Promise<Partial<typeof GraphState.State>> {
-    const response = await modelWithTools.invoke(state.messages);
-    return { messages: [response] };
-  }
+export async function resumeAgent(input: ResumeInput): Promise<AgentOutput> {
+  const {
+    sessionId,
+    decisions,
+    db,
+    userId,
+    systemPrompt,
+    enabledTools,
+    integrations,
+    decryptedTokens,
+  } = input;
 
-  async function toolExecutorNode(
-    state: typeof GraphState.State
-  ): Promise<Partial<typeof GraphState.State>> {
-    const lastMsg = state.messages[state.messages.length - 1];
-    if (!(lastMsg instanceof AIMessage) || !lastMsg.tool_calls?.length) {
-      return {};
-    }
-
-    const { ToolMessage } = await import("@langchain/core/messages");
-    const results: BaseMessage[] = [];
-    let confirmation: PendingConfirmation | null = null;
-
-    for (const tc of lastMsg.tool_calls) {
-      const matchingTool = lcTools.find((t) => t.name === tc.name);
-      toolCallNames.push(tc.name);
-      if (matchingTool) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = await (matchingTool as any).invoke(tc.args);
-        const resultStr = String(result);
-        results.push(
-          new ToolMessage({ content: resultStr, tool_call_id: tc.id! })
-        );
-
-        if (resultStr.includes(CONFIRMATION_SENTINEL)) {
-          try {
-            const parsed = JSON.parse(resultStr);
-            confirmation = {
-              tool_call_id: parsed.tool_call_id,
-              tool_name: tc.name,
-              message: parsed.message,
-              args: tc.args as Record<string, unknown>,
-            };
-          } catch {
-            /* not valid JSON, ignore */
-          }
-        }
-      }
-    }
-    return { messages: results, pendingConfirmation: confirmation };
-  }
-
-  function shouldContinue(state: typeof GraphState.State): string {
-    if (state.pendingConfirmation) {
-      return "end";
-    }
-
-    const lastMsg = state.messages[state.messages.length - 1];
-    if (lastMsg instanceof AIMessage && lastMsg.tool_calls?.length) {
-      const iterations = state.messages.filter(
-        (m) => m instanceof AIMessage && (m as AIMessage).tool_calls?.length
-      ).length;
-      if (iterations >= MAX_TOOL_ITERATIONS) return "end";
-      return "tools";
-    }
-    return "end";
-  }
-
-  const graph = new StateGraph(GraphState)
-    .addNode("agent", agentNode)
-    .addNode("tools", toolExecutorNode)
-    .addEdge("__start__", "agent")
-    .addConditionalEdges("agent", shouldContinue, {
-      tools: "tools",
-      end: "__end__",
-    })
-    .addEdge("tools", "agent");
-
-  const checkpointer = new MemorySaver();
-  const app = graph.compile({ checkpointer });
-
-  const initialMessages: BaseMessage[] = [
-    new SystemMessage(systemPrompt),
-    ...priorMessages,
-    new HumanMessage(message),
-  ];
-
-  const finalState = await app.invoke(
-    {
-      messages: initialMessages,
-      sessionId,
-      userId,
-      systemPrompt,
-      pendingConfirmation: null,
-    },
-    { configurable: { thread_id: sessionId } }
+  const agent = buildConfiguredAgent(
+    { db, userId, sessionId, enabledTools, integrations, decryptedTokens },
+    systemPrompt,
   );
 
-  const pending: PendingConfirmation | null =
-    finalState.pendingConfirmation ?? null;
+  const config = { configurable: { thread_id: sessionId } };
+  const result = await agent.invoke(
+    new Command({ resume: { decisions } }),
+    config,
+  );
 
-  if (pending) {
-    const confirmMsg = pending.message;
-    await addMessage(db, sessionId, "assistant", confirmMsg);
-    return {
-      response: confirmMsg,
-      toolCalls: toolCallNames,
-      pendingConfirmation: pending,
-    };
-  }
-
-  const lastMessage = finalState.messages[finalState.messages.length - 1];
-  const responseText =
-    typeof lastMessage.content === "string"
-      ? lastMessage.content
-      : JSON.stringify(lastMessage.content);
-
-  await addMessage(db, sessionId, "assistant", responseText);
-
-  return {
-    response: responseText,
-    toolCalls: toolCallNames,
-    pendingConfirmation: null,
-  };
+  return toAgentOutput(db, sessionId, parseAgentResult(result, sessionId));
 }

@@ -99,6 +99,24 @@ export const TOOL_CATALOG: ToolDefinition[] = [
       required: [],
     },
   },
+  {
+    id: "web_search",
+    name: "web_search",
+    description:
+      "Searches the web for current information on any topic and returns relevant results.",
+    risk: "low",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "The search query" },
+        max_results: {
+          type: "number",
+          description: "Number of results (default 5, max 10)",
+        },
+      },
+      required: ["query"],
+    },
+  },
 ];
 
 export function getToolRisk(toolId: string): ToolRisk {

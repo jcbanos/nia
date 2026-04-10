@@ -1,22 +1,23 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServerClient, decrypt } from "@agents/db";
-import { runAgent } from "@agents/agent";
+import { runAgent, resumeAgent } from "@agents/agent";
+import type { HumanDecision } from "@agents/types";
 
 export async function POST(request: Request) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { message } = await request.json();
-    if (!message || typeof message !== "string") {
-      return NextResponse.json({ error: "Message required" }, { status: 400 });
-    }
-
+    const body = await request.json();
     const db = createServerClient();
+
+    // ── Shared user context ────────────────────────────────────
 
     const { data: profile } = await supabase
       .from("profiles")
@@ -48,6 +49,85 @@ export async function POST(request: Request) {
       }
     }
 
+    const enabledTools = (toolSettings ?? []).map(
+      (t: Record<string, unknown>) => ({
+        id: t.id as string,
+        user_id: t.user_id as string,
+        tool_id: t.tool_id as string,
+        enabled: t.enabled as boolean,
+        config_json: (t.config_json as Record<string, unknown>) ?? {},
+      })
+    );
+
+    const mappedIntegrations = (integrations ?? []).map(
+      (i: Record<string, unknown>) => ({
+        id: i.id as string,
+        user_id: i.user_id as string,
+        provider: i.provider as string,
+        scopes: (i.scopes as string[]) ?? [],
+        status: i.status as "active" | "revoked" | "expired",
+        created_at: i.created_at as string,
+      })
+    );
+
+    const systemPrompt =
+      (profile?.agent_system_prompt as string) ?? "Eres un asistente útil.";
+
+    // ── Resume mode ────────────────────────────────────────────
+
+    if (body.resume === true) {
+      const { sessionId, decisions } = body as {
+        sessionId: string;
+        decisions: HumanDecision[];
+      };
+
+      if (!sessionId || !Array.isArray(decisions) || decisions.length === 0) {
+        return NextResponse.json(
+          { error: "sessionId and decisions[] are required for resume" },
+          { status: 400 }
+        );
+      }
+
+      const { data: session } = await supabase
+        .from("agent_sessions")
+        .select("user_id")
+        .eq("id", sessionId)
+        .single();
+
+      if (!session || session.user_id !== user.id) {
+        return NextResponse.json(
+          { error: "Session not found" },
+          { status: 404 }
+        );
+      }
+
+      const result = await resumeAgent({
+        sessionId,
+        decisions,
+        db,
+        userId: user.id,
+        systemPrompt,
+        enabledTools,
+        integrations: mappedIntegrations,
+        decryptedTokens,
+      });
+
+      return NextResponse.json({
+        response: result.interrupt ? null : result.response,
+        pendingConfirmation: result.pendingConfirmation,
+        interrupt: result.interrupt,
+        sessionId,
+        toolCalls: result.toolCalls,
+      });
+    }
+
+    // ── New message mode ───────────────────────────────────────
+
+    const { message } = body;
+    if (!message || typeof message !== "string") {
+      return NextResponse.json({ error: "Message required" }, { status: 400 });
+    }
+
     let session = await supabase
       .from("agent_sessions")
       .select("*")
@@ -75,36 +155,28 @@ export async function POST(request: Request) {
     }
 
     if (!session) {
-      return NextResponse.json({ error: "Failed to create session" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Failed to create session" },
+        { status: 500 }
+      );
     }
 
     const result = await runAgent({
       message,
       userId: user.id,
       sessionId: session.id,
-      systemPrompt: (profile?.agent_system_prompt as string) ?? "Eres un asistente útil.",
+      systemPrompt,
       db,
-      enabledTools: (toolSettings ?? []).map((t: Record<string, unknown>) => ({
-        id: t.id as string,
-        user_id: t.user_id as string,
-        tool_id: t.tool_id as string,
-        enabled: t.enabled as boolean,
-        config_json: (t.config_json as Record<string, unknown>) ?? {},
-      })),
-      integrations: (integrations ?? []).map((i: Record<string, unknown>) => ({
-        id: i.id as string,
-        user_id: i.user_id as string,
-        provider: i.provider as string,
-        scopes: (i.scopes as string[]) ?? [],
-        status: i.status as "active" | "revoked" | "expired",
-        created_at: i.created_at as string,
-      })),
+      enabledTools,
+      integrations: mappedIntegrations,
       decryptedTokens,
     });
 
     return NextResponse.json({
-      response: result.pendingConfirmation ? null : result.response,
+      response: result.interrupt ? null : result.response,
       pendingConfirmation: result.pendingConfirmation,
+      interrupt: result.interrupt,
+      sessionId: session.id,
       toolCalls: result.toolCalls,
     });
   } catch (error) {

@@ -2,9 +2,8 @@ import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { DbClient } from "@agents/db";
 import type { UserToolSetting, UserIntegration } from "@agents/types";
-import { TOOL_CATALOG, toolRequiresConfirmation } from "./catalog";
+import { TOOL_CATALOG } from "./catalog";
 import { createToolCall, updateToolCallStatus } from "@agents/db";
-import { CONFIRMATION_SENTINEL } from "../graph";
 
 interface ToolContext {
   db: DbClient;
@@ -29,11 +28,10 @@ function isToolAvailable(toolId: string, ctx: ToolContext): boolean {
   return true;
 }
 
-function getOctokit(ctx: ToolContext) {
+async function getOctokit(ctx: ToolContext) {
   const token = ctx.decryptedTokens.github;
   if (!token) throw new Error("GitHub token not available");
-  // Lazy-import to avoid bundling when not used
-  const { Octokit } = require("octokit") as typeof import("octokit");
+  const { Octokit } = await import("octokit");
   return new Octokit({ auth: token });
 }
 
@@ -77,17 +75,6 @@ async function getGmailAccessToken(ctx: ToolContext): Promise<string> {
   ctx.decryptedTokens.google = JSON.stringify(blob);
 
   return blob.access_token;
-}
-
-function confirmationResult(
-  toolCallId: string,
-  message: string
-): string {
-  return JSON.stringify({
-    [CONFIRMATION_SENTINEL]: true,
-    tool_call_id: toolCallId,
-    message,
-  });
 }
 
 export function buildLangChainTools(ctx: ToolContext) {
@@ -146,7 +133,7 @@ export function buildLangChainTools(ctx: ToolContext) {
             false
           );
           try {
-            const octokit = getOctokit(ctx);
+            const octokit = await getOctokit(ctx);
             const { data } =
               await octokit.rest.repos.listForAuthenticatedUser({
                 per_page: input.per_page,
@@ -194,7 +181,7 @@ export function buildLangChainTools(ctx: ToolContext) {
             false
           );
           try {
-            const octokit = getOctokit(ctx);
+            const octokit = await getOctokit(ctx);
             const { data } = await octokit.rest.issues.listForRepo({
               owner: input.owner,
               repo: input.repo,
@@ -239,27 +226,19 @@ export function buildLangChainTools(ctx: ToolContext) {
     tools.push(
       tool(
         async (input) => {
-          const needsConfirm =
-            toolRequiresConfirmation("github_create_issue");
           const record = await createToolCall(
             ctx.db,
             ctx.sessionId,
             "github_create_issue",
             input,
-            needsConfirm
+            false
           );
-          if (needsConfirm) {
-            return confirmationResult(
-              record.id,
-              `I need your confirmation to create issue "${input.title}" in ${input.owner}/${input.repo}.`
-            );
-          }
           return await executeCreateIssue(ctx, record.id, input);
         },
         {
           name: "github_create_issue",
           description:
-            "Creates a new issue in a GitHub repository. Requires confirmation.",
+            "Creates a new issue in a GitHub repository.",
           schema: z.object({
             owner: z.string(),
             repo: z.string(),
@@ -275,31 +254,95 @@ export function buildLangChainTools(ctx: ToolContext) {
     tools.push(
       tool(
         async (input) => {
-          const needsConfirm =
-            toolRequiresConfirmation("github_create_repo");
           const record = await createToolCall(
             ctx.db,
             ctx.sessionId,
             "github_create_repo",
             input,
-            needsConfirm
+            false
           );
-          if (needsConfirm) {
-            return confirmationResult(
-              record.id,
-              `I need your confirmation to create repository "${input.name}"${input.is_private ? " (private)" : ""}.`
-            );
-          }
           return await executeCreateRepo(ctx, record.id, input);
         },
         {
           name: "github_create_repo",
           description:
-            "Creates a new GitHub repository for the authenticated user. Requires confirmation.",
+            "Creates a new GitHub repository for the authenticated user.",
           schema: z.object({
             name: z.string(),
             description: z.string().optional().default(""),
             is_private: z.boolean().optional().default(false),
+          }),
+        }
+      )
+    );
+  }
+
+  if (isToolAvailable("web_search", ctx)) {
+    tools.push(
+      tool(
+        async (input) => {
+          const record = await createToolCall(
+            ctx.db,
+            ctx.sessionId,
+            "web_search",
+            input,
+            false
+          );
+          try {
+            const apiKey = process.env.TAVILY_API_KEY;
+            if (!apiKey) throw new Error("TAVILY_API_KEY is not configured");
+
+            const maxResults = Math.min(Math.max(input.max_results, 1), 10);
+            const res = await fetch("https://api.tavily.com/search", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                api_key: apiKey,
+                query: input.query,
+                max_results: maxResults,
+                include_answer: true,
+              }),
+            });
+
+            if (!res.ok) {
+              throw new Error(`Tavily API error: ${res.status} ${res.statusText}`);
+            }
+
+            const data = await res.json();
+            const result = {
+              answer: data.answer ?? null,
+              results: (data.results ?? []).map(
+                (r: { title: string; url: string; content: string }) => ({
+                  title: r.title,
+                  url: r.url,
+                  content: r.content,
+                })
+              ),
+            };
+            await updateToolCallStatus(ctx.db, record.id, "executed", result);
+            return JSON.stringify(result);
+          } catch (err) {
+            const msg =
+              err instanceof Error ? err.message : "Unknown error";
+            await updateToolCallStatus(ctx.db, record.id, "failed", {
+              error: msg,
+            });
+            return JSON.stringify({ error: msg });
+          }
+        },
+        {
+          name: "web_search",
+          description:
+            "Searches the web for current information on any topic and returns relevant results.",
+          schema: z.object({
+            query: z.string().describe("The search query"),
+            max_results: z
+              .number()
+              .min(1)
+              .max(10)
+              .optional()
+              .default(5)
+              .describe("Number of results to return"),
           }),
         }
       )
@@ -394,7 +437,7 @@ export async function executeCreateIssue(
   args: { owner: string; repo: string; title: string; body?: string }
 ): Promise<string> {
   try {
-    const octokit = getOctokit(ctx);
+    const octokit = await getOctokit(ctx);
     const { data } = await octokit.rest.issues.create({
       owner: args.owner,
       repo: args.repo,
@@ -421,7 +464,7 @@ export async function executeCreateRepo(
   args: { name: string; description?: string; is_private?: boolean }
 ): Promise<string> {
   try {
-    const octokit = getOctokit(ctx);
+    const octokit = await getOctokit(ctx);
     const { data } = await octokit.rest.repos.createForAuthenticatedUser({
       name: args.name,
       description: args.description ?? "",

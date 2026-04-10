@@ -1,36 +1,19 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import {
-  createServerClient,
-  decrypt,
-  getPendingToolCall,
-  updateToolCallStatus,
-} from "@agents/db";
-import { executeCreateIssue, executeCreateRepo } from "@agents/agent";
-import type { ToolContext } from "@agents/agent";
+import { createServerClient, decrypt } from "@agents/db";
+import { resumeAgent } from "@agents/agent";
+import type { HumanDecision } from "@agents/types";
 
-const TOOL_EXECUTORS: Record<
-  string,
-  (
-    ctx: ToolContext,
-    toolCallId: string,
-    args: Record<string, unknown>
-  ) => Promise<string>
-> = {
-  github_create_issue: (ctx, id, args) =>
-    executeCreateIssue(
-      ctx,
-      id,
-      args as Parameters<typeof executeCreateIssue>[2]
-    ),
-  github_create_repo: (ctx, id, args) =>
-    executeCreateRepo(
-      ctx,
-      id,
-      args as Parameters<typeof executeCreateRepo>[2]
-    ),
-};
-
+/**
+ * Backward-compatible resolve endpoint.
+ *
+ * In the new HITL flow the graph stores the *session ID* as the
+ * `pendingConfirmation.tool_call_id`, so the `[id]` route param is
+ * treated as a session ID.  Decisions are forwarded to `resumeAgent`
+ * which resumes the graph via `Command({ resume })`.
+ *
+ * Prefer using POST /api/chat with `{ resume: true }` instead.
+ */
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -51,38 +34,31 @@ export async function POST(
     );
   }
 
-  const { id: toolCallId } = await params;
+  const { id: sessionId } = await params;
   const db = createServerClient();
 
-  const toolCall = await getPendingToolCall(db, toolCallId);
-  if (!toolCall) {
-    return NextResponse.json(
-      { error: "Tool call not found or not pending" },
-      { status: 404 }
-    );
-  }
-
-  const { data: session } = await db
+  const { data: session } = await supabase
     .from("agent_sessions")
     .select("user_id")
-    .eq("id", toolCall.session_id)
+    .eq("id", sessionId)
     .single();
 
   if (!session || session.user_id !== user.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   }
 
-  if (action === "reject") {
-    await updateToolCallStatus(db, toolCallId, "rejected");
-    return NextResponse.json({
-      ok: true,
-      message: "Acción cancelada.",
-    });
-  }
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("agent_system_prompt")
+    .eq("id", user.id)
+    .single();
 
-  await updateToolCallStatus(db, toolCallId, "approved");
+  const { data: toolSettings } = await supabase
+    .from("user_tool_settings")
+    .select("*")
+    .eq("user_id", user.id);
 
-  const { data: integrations } = await db
+  const { data: integrations } = await supabase
     .from("user_integrations")
     .select("*")
     .eq("user_id", user.id)
@@ -101,15 +77,15 @@ export async function POST(
     }
   }
 
-  const { data: toolSettings } = await db
-    .from("user_tool_settings")
-    .select("*")
-    .eq("user_id", user.id);
+  const decisions: HumanDecision[] = [{ type: action }];
 
-  const toolCtx: ToolContext = {
+  const result = await resumeAgent({
+    sessionId,
+    decisions,
     db,
     userId: user.id,
-    sessionId: toolCall.session_id,
+    systemPrompt:
+      (profile?.agent_system_prompt as string) ?? "Eres un asistente útil.",
     enabledTools: (toolSettings ?? []).map((t: Record<string, unknown>) => ({
       id: t.id as string,
       user_id: t.user_id as string,
@@ -126,31 +102,13 @@ export async function POST(
       created_at: i.created_at as string,
     })),
     decryptedTokens,
-  };
+  });
 
-  const executor = TOOL_EXECUTORS[toolCall.tool_name];
-  if (!executor) {
-    await updateToolCallStatus(db, toolCallId, "failed", {
-      error: `No executor for ${toolCall.tool_name}`,
-    });
-    return NextResponse.json(
-      { error: `No executor for tool: ${toolCall.tool_name}` },
-      { status: 400 }
-    );
-  }
-
-  const resultStr = await executor(
-    toolCtx,
-    toolCallId,
-    toolCall.arguments_json
-  );
-
-  let result: Record<string, unknown>;
-  try {
-    result = JSON.parse(resultStr);
-  } catch {
-    result = { message: resultStr };
-  }
-
-  return NextResponse.json({ ok: true, result });
+  return NextResponse.json({
+    ok: true,
+    response: result.response,
+    interrupt: result.interrupt,
+    toolCalls: result.toolCalls,
+    result: result.response ? { message: result.response } : null,
+  });
 }

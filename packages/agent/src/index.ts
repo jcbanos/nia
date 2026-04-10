@@ -1,5 +1,6 @@
-export { runAgent, CONFIRMATION_SENTINEL } from "./graph";
+export { runAgent, resumeAgent } from "./graph";
 export { TOOL_CATALOG } from "./tools/catalog";
-export type { AgentInput, AgentOutput } from "./graph";
+export type { AgentInput, AgentOutput, ResumeInput } from "./graph";
+export type { InterruptPayload, HumanDecision } from "@agents/types";
 export { executeCreateIssue, executeCreateRepo } from "./tools/adapters";
 export type { ToolContext } from "./tools/adapters";

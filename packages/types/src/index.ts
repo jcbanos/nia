@@ -75,11 +75,43 @@ export interface TelegramAccount {
   linked_at: string;
 }
 
+export { TOOL_UI_METADATA, RISK_LABELS } from "./tool-metadata";
+export type { ToolUIMetadata } from "./tool-metadata";
+
+// ---------------------------------------------------------------------------
+// HITL (Human-in-the-Loop) interrupt types
+// ---------------------------------------------------------------------------
+
+export interface ActionRequest {
+  name: string;
+  arguments: Record<string, unknown>;
+  description?: string;
+}
+
+export interface ReviewConfig {
+  action_name: string;
+  allowed_decisions: HumanDecisionType[];
+}
+
+export type HumanDecisionType = "approve" | "edit" | "reject";
+
+export interface HumanDecision {
+  type: HumanDecisionType;
+  editedAction?: { name: string; args: Record<string, unknown> };
+  message?: string;
+}
+
+export interface InterruptPayload {
+  action_requests: ActionRequest[];
+  review_configs: ReviewConfig[];
+}
+
 export interface PendingConfirmation {
   tool_call_id: string;
   tool_name: string;
   message: string;
   args: Record<string, unknown>;
+  interrupt?: InterruptPayload;
 }
 
 export interface ToolDefinition {
