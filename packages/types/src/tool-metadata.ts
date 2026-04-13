@@ -65,6 +65,14 @@ export const TOOL_UI_METADATA: ToolUIMetadata[] = [
     risk: "low",
     requiresIntegration: null,
   },
+  {
+    id: "bash",
+    name: "Terminal: ejecutar comando",
+    description:
+      "Ejecuta un comando de shell en el servidor (requiere confirmación).",
+    risk: "high",
+    requiresIntegration: null,
+  },
 ];
 
 export const RISK_LABELS: Record<ToolRisk, { text: string; color: string }> = {

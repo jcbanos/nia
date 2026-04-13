@@ -1,16 +1,6 @@
 import { NextResponse } from "next/server";
-import {
-  createServerClient,
-  decrypt,
-  getPendingToolCall,
-  updateToolCallStatus,
-} from "@agents/db";
-import {
-  runAgent,
-  executeCreateIssue,
-  executeCreateRepo,
-} from "@agents/agent";
-import type { ToolContext } from "@agents/agent";
+import { createServerClient, decrypt } from "@agents/db";
+import { runAgent, resumeAgent } from "@agents/agent";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET ?? "";
@@ -82,7 +72,7 @@ async function buildToolContext(
   db: ReturnType<typeof createServerClient>,
   userId: string,
   sessionId: string
-): Promise<ToolContext> {
+) {
   const { data: integrations } = await db
     .from("user_integrations")
     .select("*")
@@ -130,20 +120,6 @@ async function buildToolContext(
   };
 }
 
-const TOOL_EXECUTORS: Record<
-  string,
-  (
-    ctx: ToolContext,
-    toolCallId: string,
-    args: Record<string, unknown>
-  ) => Promise<string>
-> = {
-  github_create_issue: (ctx, id, args) =>
-    executeCreateIssue(ctx, id, args as Parameters<typeof executeCreateIssue>[2]),
-  github_create_repo: (ctx, id, args) =>
-    executeCreateRepo(ctx, id, args as Parameters<typeof executeCreateRepo>[2]),
-};
-
 export async function POST(request: Request) {
   const secret = request.headers.get("x-telegram-bot-api-secret-token");
   if (WEBHOOK_SECRET && secret !== WEBHOOK_SECRET) {
@@ -157,54 +133,72 @@ export async function POST(request: Request) {
     const cb = update.callback_query;
     const [action, toolCallId] = cb.data.split(":");
 
-    if (action === "approve" && toolCallId) {
-      const toolCall = await getPendingToolCall(db, toolCallId);
-      if (!toolCall) {
-        await answerCallbackQuery(cb.id, "Ya no está pendiente");
-        return NextResponse.json({ ok: true });
-      }
-
-      await db
-        .from("tool_calls")
-        .update({ status: "approved" })
-        .eq("id", toolCallId)
-        .eq("status", "pending_confirmation");
-      await answerCallbackQuery(cb.id, "Aprobado");
-      await sendTelegramMessage(
-        cb.message.chat.id,
-        "Acción aprobada. Ejecutando..."
-      );
+    if ((action === "approve" || action === "reject") && toolCallId) {
+      const sessionId = toolCallId;
 
       const { data: session } = await db
         .from("agent_sessions")
         .select("user_id")
-        .eq("id", toolCall.session_id)
+        .eq("id", sessionId)
         .single();
 
-      if (session) {
-        const toolCtx = await buildToolContext(
+      if (!session) {
+        await answerCallbackQuery(cb.id, "Sesión no encontrada");
+        return NextResponse.json({ ok: true });
+      }
+
+      const isApprove = action === "approve";
+      await answerCallbackQuery(cb.id, isApprove ? "Aprobado" : "Rechazado");
+      await sendTelegramMessage(
+        cb.message.chat.id,
+        isApprove ? "Acción aprobada. Ejecutando..." : "Acción cancelada."
+      );
+
+      if (isApprove) {
+        const { data: profile } = await db
+          .from("profiles")
+          .select("agent_system_prompt")
+          .eq("id", session.user_id)
+          .single();
+
+        const toolCtx = await buildToolContext(db, session.user_id, sessionId);
+
+        const result = await resumeAgent({
+          sessionId,
+          decisions: [{ type: "approve" }],
           db,
-          session.user_id,
-          toolCall.session_id
-        );
-        const executor = TOOL_EXECUTORS[toolCall.tool_name];
-        if (executor) {
-          const execResult = await executor(
-            toolCtx,
-            toolCallId,
-            toolCall.arguments_json
+          userId: session.user_id,
+          systemPrompt:
+            profile?.agent_system_prompt ?? "Eres un asistente útil.",
+          enabledTools: toolCtx.enabledTools,
+          integrations: toolCtx.integrations,
+          decryptedTokens: toolCtx.decryptedTokens,
+        });
+
+        if (result.pendingConfirmation) {
+          const pc = result.pendingConfirmation;
+          await sendTelegramMessage(
+            cb.message.chat.id,
+            pc.message ?? "Se requiere confirmación.",
+            {
+              inline_keyboard: [
+                [
+                  {
+                    text: "Aprobar",
+                    callback_data: `approve:${pc.tool_call_id}`,
+                  },
+                  {
+                    text: "Cancelar",
+                    callback_data: `reject:${pc.tool_call_id}`,
+                  },
+                ],
+              ],
+            }
           );
-          await sendTelegramMessage(cb.message.chat.id, execResult);
+        } else {
+          await sendTelegramMessage(cb.message.chat.id, result.response);
         }
       }
-    } else if (action === "reject" && toolCallId) {
-      await db
-        .from("tool_calls")
-        .update({ status: "rejected" })
-        .eq("id", toolCallId)
-        .eq("status", "pending_confirmation");
-      await answerCallbackQuery(cb.id, "Rechazado");
-      await sendTelegramMessage(cb.message.chat.id, "Acción cancelada.");
     }
 
     return NextResponse.json({ ok: true });

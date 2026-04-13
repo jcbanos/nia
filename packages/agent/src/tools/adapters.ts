@@ -4,6 +4,7 @@ import type { DbClient } from "@agents/db";
 import type { UserToolSetting, UserIntegration } from "@agents/types";
 import { TOOL_CATALOG } from "./catalog";
 import { createToolCall, updateToolCallStatus } from "@agents/db";
+import { executeBash } from "./bashExec";
 
 interface ToolContext {
   db: DbClient;
@@ -422,6 +423,50 @@ export function buildLangChainTools(ctx: ToolContext) {
             "Lists emails received today from the user's Gmail inbox.",
           schema: z.object({
             max_results: z.number().max(50).optional().default(20),
+          }),
+        }
+      )
+    );
+  }
+
+  if (isToolAvailable("bash", ctx)) {
+    tools.push(
+      tool(
+        async (input) => {
+          const record = await createToolCall(
+            ctx.db,
+            ctx.sessionId,
+            "bash",
+            input,
+            false
+          );
+          try {
+            const result = await executeBash(input);
+            await updateToolCallStatus(ctx.db, record.id, "executed", result);
+            return JSON.stringify(result);
+          } catch (err) {
+            const msg =
+              err instanceof Error ? err.message : "Unknown error";
+            await updateToolCallStatus(ctx.db, record.id, "failed", {
+              error: msg,
+            });
+            return JSON.stringify({ error: msg });
+          }
+        },
+        {
+          name: "bash",
+          description:
+            "Executes a shell command on the server host. Requires confirmation.",
+          schema: z.object({
+            terminal: z
+              .string()
+              .optional()
+              .default("")
+              .describe("Logical terminal identifier for correlation"),
+            prompt: z
+              .string()
+              .max(10_000)
+              .describe("The shell command to execute"),
           }),
         }
       )
