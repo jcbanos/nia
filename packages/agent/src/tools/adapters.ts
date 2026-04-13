@@ -5,6 +5,7 @@ import type { UserToolSetting, UserIntegration } from "@agents/types";
 import { TOOL_CATALOG } from "./catalog";
 import { createToolCall, updateToolCallStatus } from "@agents/db";
 import { executeBash } from "./bashExec";
+import { executeReadFile, executeWriteFile, executeEditFile } from "./fileTools";
 
 interface ToolContext {
   db: DbClient;
@@ -467,6 +468,146 @@ export function buildLangChainTools(ctx: ToolContext) {
               .string()
               .max(10_000)
               .describe("The shell command to execute"),
+          }),
+        }
+      )
+    );
+  }
+
+  if (isToolAvailable("read_file", ctx)) {
+    tools.push(
+      tool(
+        async (input) => {
+          const record = await createToolCall(
+            ctx.db,
+            ctx.sessionId,
+            "read_file",
+            input,
+            false
+          );
+          try {
+            const result = await executeReadFile(input);
+            const status = result.ok ? "executed" : "failed";
+            await updateToolCallStatus(ctx.db, record.id, status, { ...result });
+            return JSON.stringify(result);
+          } catch (err) {
+            const msg =
+              err instanceof Error ? err.message : "Unknown error";
+            await updateToolCallStatus(ctx.db, record.id, "failed", {
+              error: msg,
+            });
+            return JSON.stringify({ error: msg });
+          }
+        },
+        {
+          name: "read_file",
+          description:
+            "Reads an existing text file under the configured workspace root. Returns JSON with content and line metadata.",
+          schema: z.object({
+            path: z
+              .string()
+              .describe("File path relative to the workspace root"),
+            offset: z
+              .number()
+              .int()
+              .positive()
+              .optional()
+              .describe("1-based start line number"),
+            limit: z
+              .number()
+              .int()
+              .positive()
+              .max(10_000)
+              .optional()
+              .describe("Maximum number of lines to return"),
+          }),
+        }
+      )
+    );
+  }
+
+  if (isToolAvailable("write_file", ctx)) {
+    tools.push(
+      tool(
+        async (input) => {
+          const record = await createToolCall(
+            ctx.db,
+            ctx.sessionId,
+            "write_file",
+            input,
+            false
+          );
+          try {
+            const result = await executeWriteFile(input);
+            const status = result.ok ? "executed" : "failed";
+            await updateToolCallStatus(ctx.db, record.id, status, { ...result });
+            return JSON.stringify(result);
+          } catch (err) {
+            const msg =
+              err instanceof Error ? err.message : "Unknown error";
+            await updateToolCallStatus(ctx.db, record.id, "failed", {
+              error: msg,
+            });
+            return JSON.stringify({ error: msg });
+          }
+        },
+        {
+          name: "write_file",
+          description:
+            "Creates a new file with UTF-8 content. Fails if the file already exists. Requires confirmation.",
+          schema: z.object({
+            path: z
+              .string()
+              .describe("File path relative to the workspace root"),
+            content: z
+              .string()
+              .max(5_000_000)
+              .describe("Full file body to write (UTF-8)"),
+          }),
+        }
+      )
+    );
+  }
+
+  if (isToolAvailable("edit_file", ctx)) {
+    tools.push(
+      tool(
+        async (input) => {
+          const record = await createToolCall(
+            ctx.db,
+            ctx.sessionId,
+            "edit_file",
+            input,
+            false
+          );
+          try {
+            const result = await executeEditFile(input);
+            const status = result.ok ? "executed" : "failed";
+            await updateToolCallStatus(ctx.db, record.id, status, { ...result });
+            return JSON.stringify(result);
+          } catch (err) {
+            const msg =
+              err instanceof Error ? err.message : "Unknown error";
+            await updateToolCallStatus(ctx.db, record.id, "failed", {
+              error: msg,
+            });
+            return JSON.stringify({ error: msg });
+          }
+        },
+        {
+          name: "edit_file",
+          description:
+            "Edits an existing file by replacing exactly one occurrence of old_string with new_string. Requires confirmation.",
+          schema: z.object({
+            path: z
+              .string()
+              .describe("File path relative to the workspace root"),
+            old_string: z
+              .string()
+              .describe("Exact literal substring to find (not regex)"),
+            new_string: z
+              .string()
+              .describe("Replacement string"),
           }),
         }
       )
