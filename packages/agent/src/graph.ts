@@ -1,5 +1,10 @@
-import { createAgent, humanInTheLoopMiddleware } from "langchain";
-import { MemorySaver, Command } from "@langchain/langgraph";
+import {
+  MemorySaver,
+  StateGraph,
+  START,
+  END,
+  Command,
+} from "@langchain/langgraph";
 import {
   HumanMessage,
   AIMessage,
@@ -16,25 +21,18 @@ import type {
 import { createChatModel } from "./model";
 import { buildLangChainTools } from "./tools/adapters";
 import { getSessionMessages, addMessage } from "@agents/db";
-import { toolRequiresConfirmation } from "./tools/catalog";
+import { GraphStateAnnotation } from "./state";
+import type { GraphState } from "./state";
+import { makeAgentNode } from "./nodes/agent_node";
+import { makeToolExecutorNode } from "./nodes/tools_node";
+import { compactionNode } from "./nodes/compaction_node";
+import { buildConfirmationMessage } from "./nodes/confirmation_text";
 
 // Module-level singleton – survives across HTTP requests within the same
 // process.  Swap for @langchain/langgraph-checkpoint-postgres in production.
 const checkpointer = new MemorySaver();
 
-// ---------------------------------------------------------------------------
-// Interrupt config – maps each tool to whether HITL middleware should pause
-// ---------------------------------------------------------------------------
-
-function buildInterruptConfig(
-  tools: { name: string }[],
-): Record<string, boolean> {
-  const cfg: Record<string, boolean> = {};
-  for (const t of tools) {
-    cfg[t.name] = toolRequiresConfirmation(t.name);
-  }
-  return cfg;
-}
+const MAX_TOOL_ITERATIONS = 6;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -49,6 +47,7 @@ export interface AgentInput {
   enabledTools: UserToolSetting[];
   integrations: UserIntegration[];
   decryptedTokens: Record<string, string>;
+  bypassConfirmation?: boolean;
 }
 
 export interface AgentOutput {
@@ -82,19 +81,60 @@ interface ToolBuildContext {
   decryptedTokens: Record<string, string>;
 }
 
-function buildConfiguredAgent(ctx: ToolBuildContext, systemPrompt: string) {
-  const lcTools = buildLangChainTools(ctx);
-  return createAgent({
-    model: createChatModel(),
-    tools: lcTools,
-    systemPrompt,
-    middleware: [
-      humanInTheLoopMiddleware({
-        interruptOn: buildInterruptConfig(lcTools),
-      }),
-    ],
-    checkpointer,
+/**
+ * `iterationCount` is derived from message history: the number of consecutive
+ * `AIMessage` turns with tool_calls since the last `HumanMessage`. Equivalent
+ * to counting how many times the agent has fired tools in this user turn.
+ */
+function deriveIterationCount(messages: BaseMessage[]): number {
+  let count = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m instanceof HumanMessage) break;
+    if (m instanceof AIMessage && (m.tool_calls?.length ?? 0) > 0) count++;
+  }
+  return count;
+}
+
+function shouldContinue(state: GraphState): "tools" | "end" {
+  const last = state.messages[state.messages.length - 1];
+  if (!(last instanceof AIMessage)) return "end";
+  if ((last.tool_calls?.length ?? 0) === 0) return "end";
+  if (deriveIterationCount(state.messages) >= MAX_TOOL_ITERATIONS) return "end";
+  return "tools";
+}
+
+function buildCompiledGraph(ctx: ToolBuildContext, systemPrompt: string) {
+  const tools = buildLangChainTools(ctx);
+  const model = createChatModel();
+
+  const agentNode = makeAgentNode({
+    model,
+    tools,
+    baseSystemPrompt: systemPrompt,
   });
+  const toolsNode = makeToolExecutorNode({ tools });
+
+  const graph = new StateGraph(GraphStateAnnotation)
+    .addNode("compaction", compactionNode)
+    .addNode("agent", agentNode)
+    .addNode("tools", toolsNode)
+    .addEdge(START, "compaction")
+    .addEdge("compaction", "agent")
+    .addConditionalEdges("agent", shouldContinue, {
+      tools: "tools",
+      end: END,
+    })
+    .addEdge("tools", "compaction");
+
+  return graph.compile({ checkpointer });
+}
+
+interface ParsedResult {
+  interrupt: InterruptPayload | null;
+  pendingConfirmation: PendingConfirmation | null;
+  responseText: string;
+  toolCalls: string[];
 }
 
 function extractToolCallNames(messages: BaseMessage[]): string[] {
@@ -107,37 +147,6 @@ function extractToolCallNames(messages: BaseMessage[]): string[] {
     }
   }
   return names;
-}
-
-interface ParsedResult {
-  interrupt: InterruptPayload | null;
-  pendingConfirmation: PendingConfirmation | null;
-  responseText: string;
-  toolCalls: string[];
-}
-
-function buildConfirmationMessage(
-  toolName: string,
-  args: Record<string, unknown>,
-): string {
-  const filePath = typeof args.path === "string" ? args.path : "";
-  switch (toolName) {
-    case "write_file": {
-      const content = typeof args.content === "string" ? args.content : "";
-      const preview =
-        content.length > 80 ? content.slice(0, 80) + "…" : content;
-      return `Se creará el archivo: ${filePath}${preview ? ` (${preview})` : ""}`;
-    }
-    case "edit_file":
-      return `Se editará el archivo: ${filePath} — reemplazando fragmento de texto`;
-    case "bash": {
-      const cmd = typeof args.prompt === "string" ? args.prompt : String(args.prompt ?? "");
-      const preview = cmd.length > 120 ? cmd.slice(0, 120) + "…" : cmd;
-      return `Se ejecutará comando: ${preview}`;
-    }
-    default:
-      return `Confirmación requerida para ${toolName}`;
-  }
 }
 
 function parseAgentResult(
@@ -153,17 +162,21 @@ function parseAgentResult(
 
     // The middleware emits camelCase keys (actionRequests, reviewConfigs,
     // args, actionName, allowedDecisions). Map them to our snake_case types.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rawActions: any[] =
       val.actionRequests ?? val.action_requests ?? [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rawReviews: any[] =
       val.reviewConfigs ?? val.review_configs ?? [];
 
     const interrupt: InterruptPayload = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       action_requests: rawActions.map((ar: any) => ({
         name: ar.name,
         arguments: ar.args ?? ar.arguments ?? {},
         description: ar.description,
       })),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       review_configs: rawReviews.map((rc: any) => ({
         action_name: rc.actionName ?? rc.action_name,
         allowed_decisions: rc.allowedDecisions ?? rc.allowed_decisions ?? [],
@@ -235,9 +248,10 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
     enabledTools,
     integrations,
     decryptedTokens,
+    bypassConfirmation,
   } = input;
 
-  const agent = buildConfiguredAgent(
+  const compiled = buildCompiledGraph(
     { db, userId, sessionId, enabledTools, integrations, decryptedTokens },
     systemPrompt,
   );
@@ -250,7 +264,7 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
   let hasCheckpoint = false;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const snap: any = await (agent as any).getState(config);
+    const snap: any = await (compiled as any).getState(config);
     const msgs = snap?.values?.messages;
     hasCheckpoint = Array.isArray(msgs) && msgs.length > 0;
   } catch {
@@ -274,7 +288,16 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
 
   await addMessage(db, sessionId, "user", message);
 
-  const result = await agent.invoke({ messages: inputMessages }, config);
+  const result = await compiled.invoke(
+    {
+      messages: inputMessages,
+      sessionId,
+      userId,
+      systemPrompt,
+      bypassConfirmation: bypassConfirmation ?? false,
+    },
+    config,
+  );
   return toAgentOutput(db, sessionId, parseAgentResult(result, sessionId));
 }
 
@@ -290,13 +313,13 @@ export async function resumeAgent(input: ResumeInput): Promise<AgentOutput> {
     decryptedTokens,
   } = input;
 
-  const agent = buildConfiguredAgent(
+  const compiled = buildCompiledGraph(
     { db, userId, sessionId, enabledTools, integrations, decryptedTokens },
     systemPrompt,
   );
 
   const config = { configurable: { thread_id: sessionId } };
-  const result = await agent.invoke(
+  const result = await compiled.invoke(
     new Command({ resume: { decisions } }),
     config,
   );
