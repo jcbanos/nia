@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { createServerClient, decrypt } from "@agents/db";
+import { createServerClient } from "@agents/db";
 import { runAgent, resumeAgent } from "@agents/agent";
+import { sendTelegramMessage, answerCallbackQuery } from "@/lib/telegram";
+import { buildToolContext } from "@/lib/agent-context";
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET ?? "";
 
 interface TelegramUpdate {
@@ -21,29 +22,6 @@ interface TelegramUpdate {
   };
 }
 
-async function sendTelegramMessage(
-  chatId: number,
-  text: string,
-  replyMarkup?: Record<string, unknown>
-) {
-  const res = await fetch(
-    `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-      }),
-    }
-  );
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    console.error("Telegram sendMessage failed:", res.status, body);
-  }
-}
-
 function parseBotCommand(messageText: string): {
   command: string;
   args: string;
@@ -55,69 +33,6 @@ function parseBotCommand(messageText: string): {
   const at = head.indexOf("@");
   const command = (at === -1 ? head : head.slice(0, at)).toLowerCase();
   return { command, args: tail };
-}
-
-async function answerCallbackQuery(callbackQueryId: string, text: string) {
-  await fetch(
-    `https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
-    }
-  );
-}
-
-async function buildToolContext(
-  db: ReturnType<typeof createServerClient>,
-  userId: string,
-  sessionId: string
-) {
-  const { data: integrations } = await db
-    .from("user_integrations")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("status", "active");
-
-  const decryptedTokens: Record<string, string> = {};
-  for (const integration of integrations ?? []) {
-    if (integration.encrypted_tokens) {
-      try {
-        decryptedTokens[integration.provider] = decrypt(
-          integration.encrypted_tokens
-        );
-      } catch {
-        /* skip */
-      }
-    }
-  }
-
-  const { data: toolSettings } = await db
-    .from("user_tool_settings")
-    .select("*")
-    .eq("user_id", userId);
-
-  return {
-    db,
-    userId,
-    sessionId,
-    enabledTools: (toolSettings ?? []).map((t: Record<string, unknown>) => ({
-      id: t.id as string,
-      user_id: t.user_id as string,
-      tool_id: t.tool_id as string,
-      enabled: t.enabled as boolean,
-      config_json: (t.config_json as Record<string, unknown>) ?? {},
-    })),
-    integrations: (integrations ?? []).map((i: Record<string, unknown>) => ({
-      id: i.id as string,
-      user_id: i.user_id as string,
-      provider: i.provider as string,
-      scopes: (i.scopes as string[]) ?? [],
-      status: i.status as "active" | "revoked" | "expired",
-      created_at: i.created_at as string,
-    })),
-    decryptedTokens,
-  };
 }
 
 export async function POST(request: Request) {

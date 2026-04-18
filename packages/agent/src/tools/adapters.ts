@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { DbClient } from "@agents/db";
 import type { UserToolSetting, UserIntegration } from "@agents/types";
 import { TOOL_CATALOG } from "./catalog";
-import { createToolCall, updateToolCallStatus } from "@agents/db";
+import { createToolCall, updateToolCallStatus, createScheduledTask } from "@agents/db";
 import { executeBash } from "./bashExec";
 import { executeReadFile, executeWriteFile, executeEditFile } from "./fileTools";
 
@@ -351,6 +351,71 @@ export function buildLangChainTools(ctx: ToolContext) {
     );
   }
 
+  if (isToolAvailable("hackernews_top_stories", ctx)) {
+    tools.push(
+      tool(
+        async (input) => {
+          const record = await createToolCall(
+            ctx.db,
+            ctx.sessionId,
+            "hackernews_top_stories",
+            input,
+            false
+          );
+          try {
+            const HN = "https://hacker-news.firebaseio.com/v0";
+            const count = Math.min(Math.max(input.count, 1), 30);
+            const idsRes = await fetch(`${HN}/topstories.json`);
+            if (!idsRes.ok)
+              throw new Error(`HN API error: ${idsRes.status} ${idsRes.statusText}`);
+            const ids: number[] = await idsRes.json();
+            const topIds = ids.slice(0, count);
+
+            const stories = await Promise.all(
+              topIds.map(async (id) => {
+                const r = await fetch(`${HN}/item/${id}.json`);
+                const item = await r.json();
+                return {
+                  title: item?.title ?? "",
+                  url: item?.url ?? null,
+                  score: item?.score ?? 0,
+                  author: item?.by ?? "",
+                  comments: item?.descendants ?? 0,
+                  hn_url: `https://news.ycombinator.com/item?id=${id}`,
+                };
+              })
+            );
+
+            const result = { stories, count: stories.length };
+            await updateToolCallStatus(ctx.db, record.id, "executed", result);
+            return JSON.stringify(result);
+          } catch (err) {
+            const msg =
+              err instanceof Error ? err.message : "Unknown error";
+            await updateToolCallStatus(ctx.db, record.id, "failed", {
+              error: msg,
+            });
+            return JSON.stringify({ error: msg });
+          }
+        },
+        {
+          name: "hackernews_top_stories",
+          description:
+            "Fetches the current top stories from Hacker News, ranked by the HN algorithm.",
+          schema: z.object({
+            count: z
+              .number()
+              .min(1)
+              .max(30)
+              .optional()
+              .default(10)
+              .describe("Number of top stories to return"),
+          }),
+        }
+      )
+    );
+  }
+
   if (isToolAvailable("gmail_list_today_emails", ctx)) {
     tools.push(
       tool(
@@ -608,6 +673,96 @@ export function buildLangChainTools(ctx: ToolContext) {
             new_string: z
               .string()
               .describe("Replacement string"),
+          }),
+        }
+      )
+    );
+  }
+
+  if (isToolAvailable("schedule_task", ctx)) {
+    tools.push(
+      tool(
+        async (input) => {
+          const record = await createToolCall(
+            ctx.db,
+            ctx.sessionId,
+            "schedule_task",
+            input,
+            false
+          );
+          try {
+            if (input.schedule_type === "one_time" && !input.run_at) {
+              throw new Error("run_at is required for one_time tasks");
+            }
+            if (input.schedule_type === "recurring" && !input.cron_expr) {
+              throw new Error("cron_expr is required for recurring tasks");
+            }
+
+            let nextRunAt: string;
+            if (input.schedule_type === "one_time") {
+              nextRunAt = new Date(input.run_at!).toISOString();
+            } else {
+              const { CronExpressionParser } = await import("cron-parser");
+              const expr = CronExpressionParser.parse(input.cron_expr!, {
+                tz: input.timezone,
+              });
+              nextRunAt = expr.next().toDate().toISOString();
+            }
+
+            const task = await createScheduledTask(ctx.db, {
+              user_id: ctx.userId,
+              prompt: input.prompt,
+              schedule_type: input.schedule_type,
+              run_at: input.run_at,
+              cron_expr: input.cron_expr,
+              timezone: input.timezone,
+              next_run_at: nextRunAt,
+            });
+
+            const result = {
+              message:
+                input.schedule_type === "one_time"
+                  ? `Tarea programada para ${nextRunAt}`
+                  : `Tarea recurrente creada (${input.cron_expr}), próxima ejecución: ${nextRunAt}`,
+              task_id: task.id,
+              next_run_at: nextRunAt,
+            };
+            await updateToolCallStatus(ctx.db, record.id, "executed", result);
+            return JSON.stringify(result);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Unknown error";
+            await updateToolCallStatus(ctx.db, record.id, "failed", {
+              error: msg,
+            });
+            return JSON.stringify({ error: msg });
+          }
+        },
+        {
+          name: "schedule_task",
+          description:
+            "Creates a scheduled task that will run automatically at a specified time or on a recurring schedule. Requires confirmation.",
+          schema: z.object({
+            prompt: z
+              .string()
+              .describe("The instruction the agent will execute"),
+            schedule_type: z
+              .enum(["one_time", "recurring"])
+              .describe("Whether the task runs once or on a recurring schedule"),
+            run_at: z
+              .string()
+              .optional()
+              .describe("ISO-8601 datetime for one_time tasks"),
+            cron_expr: z
+              .string()
+              .optional()
+              .describe(
+                "Cron expression for recurring tasks (e.g. '0 9 * * 1')"
+              ),
+            timezone: z
+              .string()
+              .optional()
+              .default("UTC")
+              .describe("IANA timezone (default UTC)"),
           }),
         }
       )

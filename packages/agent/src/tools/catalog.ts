@@ -118,6 +118,23 @@ export const TOOL_CATALOG: ToolDefinition[] = [
     },
   },
   {
+    id: "hackernews_top_stories",
+    name: "hackernews_top_stories",
+    description:
+      "Fetches the current top stories from Hacker News, ranked by the HN algorithm.",
+    risk: "low",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        count: {
+          type: "number",
+          description: "Number of top stories to return (default 10, max 30)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     id: "bash",
     name: "bash",
     description:
@@ -182,6 +199,41 @@ export const TOOL_CATALOG: ToolDefinition[] = [
         },
       },
       required: ["path", "content"],
+    },
+  },
+  {
+    id: "schedule_task",
+    name: "schedule_task",
+    description:
+      "Creates a scheduled task that will run automatically at a specified time or on a recurring schedule. Requires confirmation.",
+    risk: "medium",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description: "The instruction the agent will execute",
+        },
+        schedule_type: {
+          type: "string",
+          enum: ["one_time", "recurring"],
+          description: "Whether the task runs once or on a recurring schedule",
+        },
+        run_at: {
+          type: "string",
+          description: "ISO-8601 datetime for one_time tasks",
+        },
+        cron_expr: {
+          type: "string",
+          description:
+            "Cron expression for recurring tasks (e.g. '0 9 * * 1')",
+        },
+        timezone: {
+          type: "string",
+          description: "IANA timezone (default UTC)",
+        },
+      },
+      required: ["prompt", "schedule_type"],
     },
   },
   {

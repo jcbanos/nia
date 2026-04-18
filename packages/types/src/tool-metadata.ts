@@ -66,6 +66,14 @@ export const TOOL_UI_METADATA: ToolUIMetadata[] = [
     requiresIntegration: null,
   },
   {
+    id: "hackernews_top_stories",
+    name: "Hacker News: top stories",
+    description:
+      "Obtiene las historias más populares de Hacker News en tiempo real.",
+    risk: "low",
+    requiresIntegration: null,
+  },
+  {
     id: "bash",
     name: "Terminal: ejecutar comando",
     description:
@@ -87,6 +95,14 @@ export const TOOL_UI_METADATA: ToolUIMetadata[] = [
     description:
       "Crea un archivo nuevo con contenido completo. Falla si el archivo ya existe; para cambios usa editar archivo (requiere confirmación).",
     risk: "high",
+    requiresIntegration: null,
+  },
+  {
+    id: "schedule_task",
+    name: "Programar tarea",
+    description:
+      "Crea una tarea programada que se ejecuta automáticamente (requiere confirmación).",
+    risk: "medium",
     requiresIntegration: null,
   },
   {
