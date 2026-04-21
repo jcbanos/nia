@@ -65,6 +65,54 @@ export const TOOL_UI_METADATA: ToolUIMetadata[] = [
     risk: "low",
     requiresIntegration: null,
   },
+  {
+    id: "hackernews_top_stories",
+    name: "Hacker News: top stories",
+    description:
+      "Obtiene las historias más populares de Hacker News en tiempo real.",
+    risk: "low",
+    requiresIntegration: null,
+  },
+  {
+    id: "bash",
+    name: "Terminal: ejecutar comando",
+    description:
+      "Ejecuta un comando de shell en el servidor (requiere confirmación).",
+    risk: "high",
+    requiresIntegration: null,
+  },
+  {
+    id: "read_file",
+    name: "Leer archivo",
+    description:
+      "Lee un archivo de texto existente dentro del workspace (opcionalmente por rango de líneas). No crea ni modifica archivos.",
+    risk: "low",
+    requiresIntegration: null,
+  },
+  {
+    id: "write_file",
+    name: "Crear archivo",
+    description:
+      "Crea un archivo nuevo con contenido completo. Falla si el archivo ya existe; para cambios usa editar archivo (requiere confirmación).",
+    risk: "high",
+    requiresIntegration: null,
+  },
+  {
+    id: "schedule_task",
+    name: "Programar tarea",
+    description:
+      "Crea una tarea programada que se ejecuta automáticamente (requiere confirmación).",
+    risk: "medium",
+    requiresIntegration: null,
+  },
+  {
+    id: "edit_file",
+    name: "Editar archivo",
+    description:
+      "Reemplaza una única aparición de un fragmento en un archivo existente. No crea archivos nuevos (requiere confirmación).",
+    risk: "high",
+    requiresIntegration: null,
+  },
 ];
 
 export const RISK_LABELS: Record<ToolRisk, { text: string; color: string }> = {

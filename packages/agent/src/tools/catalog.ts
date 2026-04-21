@@ -117,6 +117,150 @@ export const TOOL_CATALOG: ToolDefinition[] = [
       required: ["query"],
     },
   },
+  {
+    id: "hackernews_top_stories",
+    name: "hackernews_top_stories",
+    description:
+      "Fetches the current top stories from Hacker News, ranked by the HN algorithm.",
+    risk: "low",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        count: {
+          type: "number",
+          description: "Number of top stories to return (default 10, max 30)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    id: "bash",
+    name: "bash",
+    description:
+      "Executes a shell command on the server host. Requires confirmation.",
+    risk: "high",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        terminal: {
+          type: "string",
+          description: "Logical terminal identifier for correlation",
+        },
+        prompt: {
+          type: "string",
+          description: "The shell command to execute",
+        },
+      },
+      required: ["prompt"],
+    },
+  },
+  {
+    id: "read_file",
+    name: "read_file",
+    description:
+      'Reads an existing text file under the configured workspace root. Use this when you need to inspect source code, config, logs, or any UTF-8 text without changing it. Do not use this to create or modify files; use write_file or edit_file instead. Parameters: "path" is relative to the workspace root (no ".."). Optional "offset" is the 1-based start line number. Optional "limit" is the maximum number of lines to return starting at offset. If both are omitted the tool reads from the beginning up to a server-enforced maximum. Returns JSON with "ok", "content", line metadata, or an error object.',
+    risk: "low",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "File path relative to the workspace root",
+        },
+        offset: {
+          type: "number",
+          description: "1-based start line number (optional)",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of lines to return (optional)",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    id: "write_file",
+    name: "write_file",
+    description:
+      "Creates a new file with the given UTF-8 content. Use this only when the file must not exist yet (first-time creation). If the file already exists this tool fails by design — use edit_file to change existing files. Returns JSON with ok and bytesWritten, or an error object. Requires confirmation.",
+    risk: "high",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "File path relative to the workspace root",
+        },
+        content: {
+          type: "string",
+          description: "Full file body to write (UTF-8)",
+        },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    id: "schedule_task",
+    name: "schedule_task",
+    description:
+      "Creates a scheduled task that will run automatically at a specified time or on a recurring schedule. Requires confirmation.",
+    risk: "medium",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description: "The instruction the agent will execute",
+        },
+        schedule_type: {
+          type: "string",
+          enum: ["one_time", "recurring"],
+          description: "Whether the task runs once or on a recurring schedule",
+        },
+        run_at: {
+          type: "string",
+          description: "ISO-8601 datetime for one_time tasks",
+        },
+        cron_expr: {
+          type: "string",
+          description:
+            "Cron expression for recurring tasks (e.g. '0 9 * * 1')",
+        },
+        timezone: {
+          type: "string",
+          description: "IANA timezone (default UTC)",
+        },
+      },
+      required: ["prompt", "schedule_type"],
+    },
+  },
+  {
+    id: "edit_file",
+    name: "edit_file",
+    description:
+      "Edits an existing UTF-8 text file by replacing exactly one occurrence of old_string with new_string. Do not use this to create a new file (use write_file). old_string must match uniquely — if it matches zero or multiple places the tool fails with a clear message. Returns JSON with ok and replacements count, or an error object. Requires confirmation.",
+    risk: "high",
+    parameters_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "File path relative to the workspace root",
+        },
+        old_string: {
+          type: "string",
+          description: "Exact literal substring to find (not regex)",
+        },
+        new_string: {
+          type: "string",
+          description: "Replacement string",
+        },
+      },
+      required: ["path", "old_string", "new_string"],
+    },
+  },
 ];
 
 export function getToolRisk(toolId: string): ToolRisk {

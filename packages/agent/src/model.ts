@@ -16,3 +16,37 @@ export function createChatModel() {
     apiKey,
   });
 }
+
+export function createCompactionModel() {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY");
+
+  return new ChatOpenAI({
+    modelName: "anthropic/claude-3-5-haiku",
+    temperature: 0,
+    configuration: {
+      baseURL: "https://openrouter.ai/api/v1",
+      defaultHeaders: {
+        "HTTP-Referer": "https://agents.local",
+      },
+    },
+    apiKey,
+  });
+}
+
+export function createMemoryExtractionModel() {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY");
+
+  return new ChatOpenAI({
+    modelName: "anthropic/claude-3-5-haiku",
+    temperature: 0,
+    configuration: {
+      baseURL: "https://openrouter.ai/api/v1",
+      defaultHeaders: {
+        "HTTP-Referer": "https://agents.local",
+      },
+    },
+    apiKey,
+  });
+}

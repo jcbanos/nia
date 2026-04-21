@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServerClient, decrypt } from "@agents/db";
-import { runAgent, resumeAgent } from "@agents/agent";
+import { runAgent, resumeAgent, flushSessionMemory } from "@agents/agent";
 import type { HumanDecision } from "@agents/types";
 
 export async function POST(request: Request) {
@@ -171,6 +171,17 @@ export async function POST(request: Request) {
       integrations: mappedIntegrations,
       decryptedTokens,
     });
+
+    if (!result.pendingConfirmation) {
+      console.log(`[chat] scheduling memory flush for session=${session.id}`);
+      flushSessionMemory({
+        db,
+        userId: user.id,
+        sessionId: session.id,
+      }).catch((e) => console.error("memory flush failed:", e));
+    } else {
+      console.log("[chat] skipping memory flush: pending confirmation");
+    }
 
     return NextResponse.json({
       response: result.interrupt ? null : result.response,
