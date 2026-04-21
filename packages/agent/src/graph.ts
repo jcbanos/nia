@@ -26,6 +26,7 @@ import type { GraphState } from "./state";
 import { makeAgentNode } from "./nodes/agent_node";
 import { makeToolExecutorNode } from "./nodes/tools_node";
 import { compactionNode } from "./nodes/compaction_node";
+import { createMemoryInjectionNode } from "./nodes/memory_injection_node";
 import { buildConfirmationMessage } from "./nodes/confirmation_text";
 
 // Module-level singleton – survives across HTTP requests within the same
@@ -114,12 +115,18 @@ function buildCompiledGraph(ctx: ToolBuildContext, systemPrompt: string) {
     baseSystemPrompt: systemPrompt,
   });
   const toolsNode = makeToolExecutorNode({ tools });
+  const memoryInjectionNode = createMemoryInjectionNode({
+    db: ctx.db,
+    userId: ctx.userId,
+  });
 
   const graph = new StateGraph(GraphStateAnnotation)
+    .addNode("memory_injection", memoryInjectionNode)
     .addNode("compaction", compactionNode)
     .addNode("agent", agentNode)
     .addNode("tools", toolsNode)
-    .addEdge(START, "compaction")
+    .addEdge(START, "memory_injection")
+    .addEdge("memory_injection", "compaction")
     .addEdge("compaction", "agent")
     .addConditionalEdges("agent", shouldContinue, {
       tools: "tools",

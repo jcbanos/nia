@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@agents/db";
-import { runAgent, resumeAgent } from "@agents/agent";
+import { runAgent, resumeAgent, flushSessionMemory } from "@agents/agent";
 import { sendTelegramMessage, answerCallbackQuery } from "@/lib/telegram";
 import { buildToolContext } from "@/lib/agent-context";
 
@@ -112,6 +112,11 @@ export async function POST(request: Request) {
           );
         } else {
           await sendTelegramMessage(cb.message.chat.id, result.response);
+          flushSessionMemory({
+            db,
+            userId: session.user_id,
+            sessionId,
+          }).catch((e) => console.error("memory flush failed:", e));
         }
       }
     }
@@ -275,6 +280,11 @@ export async function POST(request: Request) {
       );
     } else {
       await sendTelegramMessage(chatId, result.response);
+      flushSessionMemory({
+        db,
+        userId,
+        sessionId: session.id,
+      }).catch((e) => console.error("memory flush failed:", e));
     }
   } catch (error) {
     console.error("Telegram agent error:", error);

@@ -1,4 +1,5 @@
 export { runAgent, resumeAgent } from "./graph";
+export { flushSessionMemory } from "./memory_flush";
 export { TOOL_CATALOG } from "./tools/catalog";
 export type { AgentInput, AgentOutput, ResumeInput } from "./graph";
 export type { InterruptPayload, HumanDecision } from "@agents/types";
