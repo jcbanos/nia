@@ -28,6 +28,7 @@ import { makeToolExecutorNode } from "./nodes/tools_node";
 import { compactionNode } from "./nodes/compaction_node";
 import { createMemoryInjectionNode } from "./nodes/memory_injection_node";
 import { buildConfirmationMessage } from "./nodes/confirmation_text";
+import { createLangfuseCallbackHandler } from "./langfuse";
 
 // Module-level singleton – survives across HTTP requests within the same
 // process.  Swap for @langchain/langgraph-checkpoint-postgres in production.
@@ -103,6 +104,35 @@ function shouldContinue(state: GraphState): "tools" | "end" {
   if ((last.tool_calls?.length ?? 0) === 0) return "end";
   if (deriveIterationCount(state.messages) >= MAX_TOOL_ITERATIONS) return "end";
   return "tools";
+}
+
+function buildInvokeConfig(
+  sessionId: string,
+  userId: string,
+  operation: "run" | "resume",
+  enabledTools: UserToolSetting[],
+) {
+  const enabledToolNames = enabledTools
+    .filter((tool) => tool.enabled)
+    .map((tool) => tool.tool_id);
+  const langfuseHandler = createLangfuseCallbackHandler({
+    userId,
+    sessionId,
+    operation,
+    enabledToolNames,
+  });
+
+  return {
+    configurable: { thread_id: sessionId },
+    callbacks: langfuseHandler ? [langfuseHandler] : undefined,
+    runName: `agent.${operation}`,
+    metadata: {
+      userId,
+      sessionId,
+      operation,
+      enabledToolNames,
+    },
+  };
 }
 
 function buildCompiledGraph(ctx: ToolBuildContext, systemPrompt: string) {
@@ -263,7 +293,8 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
     systemPrompt,
   );
 
-  const config = { configurable: { thread_id: sessionId } };
+  const config = buildInvokeConfig(sessionId, userId, "run", enabledTools);
+  const stateConfig = { configurable: config.configurable };
 
   // If the checkpointer already holds state for this thread we only append
   // the new message; otherwise we bootstrap from the database so the model
@@ -271,7 +302,7 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
   let hasCheckpoint = false;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const snap: any = await (compiled as any).getState(config);
+    const snap: any = await (compiled as any).getState(stateConfig);
     const msgs = snap?.values?.messages;
     hasCheckpoint = Array.isArray(msgs) && msgs.length > 0;
   } catch {
@@ -325,7 +356,7 @@ export async function resumeAgent(input: ResumeInput): Promise<AgentOutput> {
     systemPrompt,
   );
 
-  const config = { configurable: { thread_id: sessionId } };
+  const config = buildInvokeConfig(sessionId, userId, "resume", enabledTools);
   const result = await compiled.invoke(
     new Command({ resume: { decisions } }),
     config,
